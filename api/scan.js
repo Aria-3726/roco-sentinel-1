@@ -199,7 +199,9 @@ export default async function handler(req, res) {
       return fallbackParse(chunks, logs, res);
     }
 
-    const posts = (parsed.posts || []).filter(p => p.url?.startsWith('https://'));
+    const posts = (parsed.posts || [])
+      .filter(p => p.url?.startsWith('https://'))
+      .map(p => postProcess(p));
     logs.push(`🎉 DeepSeek: ${posts.length} posts, ${(parsed.issues || []).length} issues`);
 
     return res.status(200).json({
@@ -212,6 +214,51 @@ export default async function handler(req, res) {
     logs.push(`❌ Fatal: ${e.message}`);
     return res.status(200).json({ posts: [], issues: [], logs });
   }
+}
+
+// Post-process: validate and fix LLM output
+function postProcess(p) {
+  // 1. Date validation
+  if (p.d && p.d !== 'unknown') {
+    const date = new Date(p.d);
+    const now = new Date();
+    const minDate = new Date('2020-01-01');
+    // Future dates or impossibly old dates → mark unknown
+    if (isNaN(date) || date > now || date < minDate) {
+      // Try to salvage: if year is wrong but month/day exist, check URL for hints
+      p.d = 'unknown';
+    }
+  }
+  // Normalize "unknown" display
+  if (!p.d || p.d === 'unknown' || p.d === 'null') p.d = '';
+
+  // 2. Language normalization
+  const langMap = {
+    'en': '英语', 'english': '英语', 'eng': '英语',
+    'zh': '中文', 'chinese': '中文', 'cn': '中文', 'zh-cn': '中文', 'zh-tw': '中文',
+    'ja': '日语', 'japanese': '日语', 'jp': '日语',
+    'th': '泰语', 'thai': '泰语',
+    'vi': '越南语', 'vietnamese': '越南语',
+    'id': '印尼语', 'indonesian': '印尼语',
+    'ko': '韩语', 'korean': '韩语',
+  };
+  if (p.l) {
+    const normalized = langMap[p.l.toLowerCase()];
+    if (normalized) p.l = normalized;
+  }
+
+  // 3. Platform validation (override LLM with URL-based detection)
+  if (p.url) p.p = detectPlatform(p.url);
+
+  // 4. Username cleanup
+  if (!p.u || p.u === 'Unknown' || p.u === 'unknown' || p.u === '未知' || p.u === '未知频道') {
+    p.u = extractUsername(p.url, p.t);
+  }
+
+  // 5. Sentiment validation
+  if (!['pos', 'neg', 'neu'].includes(p.s)) p.s = 'neu';
+
+  return p;
 }
 
 // Fallback: basic keyword sentiment when LLM fails
