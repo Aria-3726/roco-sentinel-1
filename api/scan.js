@@ -8,17 +8,54 @@ const QUERIES = [
   '洛克王国世界 overseas TikTok Reddit 2026',
 ];
 
-const SYS = `你是"洛克王国：世界"(Roco Kingdom: World)的海外舆情分析师。
-根据提供的搜索结果，返回纯JSON（不要markdown代码块）：
-{"posts":[{"p":"x|reddit|youtube|tiktok|media|forum|threads","u":"来源名","t":"中文摘要(最多60字)","d":"YYYY-MM-DD","s":"pos|neg|neu","l":"语言","url":"完整https链接"}],"issues":[{"title":"中文(最多25字)","sev":"critical|warning|watch","desc":"中文(最多100字)","plats":["平台名"],"tip":"中文建议(最多50字)"}]}
-规则：
+const TODAY = new Date().toISOString().slice(0, 10);
+
+const SYS = `你是"洛克王国：世界"(Roco Kingdom: World)的海外舆情分析师。今天是${TODAY}。
+根据搜索结果，返回纯JSON（不要markdown代码块、不要任何解释文字）：
+{"posts":[...],"issues":[...]}
+
+## posts 字段规范
+每条post: {"p":"平台","u":"来源名","t":"中文摘要","d":"YYYY-MM-DD","s":"pos|neg|neu","l":"语言","url":"链接"}
+
+### 平台(p) — 严格按URL域名判断：
+x.com/twitter.com→"x", reddit.com→"reddit", youtube.com/youtu.be→"youtube", tiktok.com→"tiktok", threads.net→"threads", taptap.io/resetera.com/gamefaqs.gamespot.com→"forum", 其他所有→"media"
+
+### 来源名(u) — 必须从内容/URL中提取真实名称：
+- X/Twitter: @用户名
+- Reddit: r/子版块名
+- YouTube: 频道名（从标题或内容提取，不要写"YouTube"）
+- TikTok: @用户名
+- 媒体: 网站名称（如GamingOnPhone、South China Morning Post，不要写域名）
+- 如果是转载/聚合，写原始来源名
+
+### 日期(d) — 这是最重要的字段，必须准确：
+- 从文章内容、URL路径中的日期、明确提到的发布时间来判断
+- 如果内容提到"June 2024 batch"或类似历史事件，日期应为2024年，不是今天
+- 如果内容讨论的是过去事件的回顾/存档页面，用原始事件日期
+- 绝对不要把搜索抓取时间当作发布日期
+- 如果实在无法判断准确日期，写"unknown"而不是猜测
+
+### 情绪(s) — 基于内容实际态度判断：
+- pos: 明确表达喜爱、期待、推荐、赞美
+- neg: 明确表达批评、不满、担忧、反对（如抄袭指控、P2W吐槽、锁区不满）
+- neu: 纯新闻报道、信息转发、中立讨论、无明显倾向
+
+### 语言(l) — 根据原文实际语言：
+英语/中文/日语/泰语/越南语/印尼语/韩语。如果是英文媒体报道中国游戏，语言是"英语"不是"中文"。
+
+### 摘要(t) — 60字以内中文：
+概括核心信息，不要复述标题，要体现该条目的独特价值。
+
+## issues 字段规范
+2-5个核心议题: {"title":"中文≤25字","sev":"critical|warning|watch","desc":"中文≤100字","plats":["平台名"],"tip":"中文建议≤50字"}
+- critical: 需要立即响应的危机
+- warning: 需要关注的趋势
+- watch: 背景性风险
+
+## 过滤规则
 - 只收录有完整https://链接的条目
 - URL去重
-- 根据URL判断平台：x.com→x, reddit.com→reddit, youtube.com→youtube, tiktok.com→tiktok, threads.net→threads, taptap/resetera/gamefaqs→forum, 其他→media
-- 情感分析要准确：正面=pos, 负面=neg, 中性=neu
-- 摘要用中文
-- 生成2-5个核心议题(issues)
-- 只返回JSON，不要其他任何文字`;
+- 过滤掉与洛克王国无关的结果`;
 
 function detectPlatform(url) {
   if (!url) return 'media';
@@ -84,7 +121,7 @@ export default async function handler(req, res) {
             query: q,
             search_depth: 'advanced',
             max_results: 10,
-            include_raw_content: false,
+            include_raw_content: true,
           }),
         });
 
@@ -99,9 +136,22 @@ export default async function handler(req, res) {
         );
         logs.push(`✅ Got ${results.length} relevant results`);
 
-        const formatted = results.map(r =>
-          `Title: ${r.title}\nURL: ${r.url}\nDate: ${r.published_date || 'unknown'}\nContent: ${(r.content || '').slice(0, 300)}`
-        ).join('\n---\n');
+        const formatted = results.map(r => {
+          // Extract date hints from URL path (e.g., /2024/06/...)
+          const urlDateHint = r.url.match(/\/(\d{4})\/(\d{2})\//);
+          const dateInfo = urlDateHint
+            ? `URL-date-hint: ${urlDateHint[1]}-${urlDateHint[2]}`
+            : `Tavily-date: ${r.published_date || 'unknown (需从内容判断)'}`;
+          // Include beginning of raw content for better context
+          const rawExcerpt = r.raw_content ? r.raw_content.slice(0, 500) : '';
+          return [
+            `Title: ${r.title}`,
+            `URL: ${r.url}`,
+            `${dateInfo}`,
+            `Snippet: ${(r.content || '').slice(0, 300)}`,
+            rawExcerpt ? `RawContent: ${rawExcerpt}` : '',
+          ].filter(Boolean).join('\n');
+        }).join('\n---\n');
 
         if (formatted.length > 50) chunks.push(formatted);
       } catch (e) {
@@ -124,11 +174,11 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'deepseek-chat',
-        max_tokens: 3000,
-        temperature: 0.3,
+        max_tokens: 4000,
+        temperature: 0.1,
         messages: [
           { role: 'system', content: SYS },
-          { role: 'user', content: chunks.join('\n\n===\n\n').slice(0, 12000) },
+          { role: 'user', content: chunks.join('\n\n===\n\n').slice(0, 20000) },
         ],
       }),
     });
