@@ -1,5 +1,5 @@
 // Vercel Serverless Function — /api/scan
-// Tavily 搜索 + Anthropic Claude 分析
+// 纯 Tavily 搜索，无需 LLM，关键词情感分析
 
 const QUERIES = [
   '"Roco Kingdom World" latest 2026',
@@ -8,14 +8,66 @@ const QUERIES = [
   '洛克王国世界 overseas TikTok Reddit 2026',
 ];
 
-const SYS = `You are a bilingual gaming sentiment analyst for "Roco Kingdom: World" (洛克王国：世界).
-Return ONLY valid JSON. No backticks, markdown, or preamble.
-{"posts":[{"p":"x|reddit|youtube|tiktok|media|forum|threads","u":"name","t":"Chinese summary max 60 chars","d":"YYYY-MM-DD","s":"pos|neg|neu","l":"language","url":"full https URL"}],"issues":[{"title":"Chinese max 25 chars","sev":"critical|warning|watch","desc":"Chinese max 100 chars","plats":["names"],"tip":"Chinese max 50 chars"}]}
-Only include items with real complete https:// URLs from the search results provided. Deduplicate. Summarize in Chinese. 2-5 issues.
-Classify platform by URL: x.com→x, reddit.com→reddit, youtube.com→youtube, tiktok.com→tiktok, threads.net→threads, taptap→forum, everything else→media.`;
+// 关键词情感分析
+const NEG_WORDS = ['controversy','copy','copycat','plagiarism','stolen','sue','lawsuit','ban','disappointed','angry','boring','scam','p2w','pay to win','predatory','gacha','cashgrab','rip-off','ripoff','theft','terrible','awful','negative','backlash','outrage','furious','trash','garbage','flop','dead','抄袭','骗','垃圾','差评','失望','愤怒','无聊','氪金','圈钱'];
+const POS_WORDS = ['amazing','beautiful','love','incredible','awesome','excited','hype','best','stunning','gorgeous','masterpiece','fantastic','great','wonderful','promising','impressive','recommend','fun','enjoy','addicted','can\'t wait','hyped','好玩','期待','惊艳','漂亮','好评','推荐','喜欢','治愈','沉迷','优秀'];
+
+function detectSentiment(text) {
+  const t = text.toLowerCase();
+  let pos = 0, neg = 0;
+  NEG_WORDS.forEach(w => { if (t.includes(w)) neg++; });
+  POS_WORDS.forEach(w => { if (t.includes(w)) pos++; });
+  if (neg > pos) return 'neg';
+  if (pos > neg) return 'pos';
+  return 'neu';
+}
+
+function detectPlatform(url) {
+  if (!url) return 'media';
+  if (url.includes('x.com') || url.includes('twitter.com')) return 'x';
+  if (url.includes('reddit.com')) return 'reddit';
+  if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
+  if (url.includes('tiktok.com')) return 'tiktok';
+  if (url.includes('threads.net')) return 'threads';
+  if (url.includes('taptap.io') || url.includes('resetera.com') || url.includes('gamefaqs.')) return 'forum';
+  return 'media';
+}
+
+function detectLanguage(text) {
+  if (/[\u4e00-\u9fff]/.test(text)) return '中文';
+  if (/[\u3040-\u309f\u30a0-\u30ff]/.test(text)) return '日语';
+  if (/[\u0e00-\u0e7f]/.test(text)) return '泰语';
+  if (/[\u1e00-\u1eff]/.test(text) && /ư|ơ|ă|đ/.test(text)) return '越南语';
+  return '英语';
+}
+
+function extractUsername(url, title) {
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes('reddit.com')) {
+      const m = u.pathname.match(/\/r\/([^/]+)/);
+      return m ? 'r/' + m[1] : 'Reddit';
+    }
+    if (u.hostname.includes('x.com') || u.hostname.includes('twitter.com')) {
+      const m = u.pathname.match(/\/([^/]+)/);
+      return m ? '@' + m[1] : 'X';
+    }
+    if (u.hostname.includes('youtube.com')) return title?.split(/[-–|]/).pop()?.trim()?.slice(0, 20) || 'YouTube';
+    if (u.hostname.includes('tiktok.com')) {
+      const m = u.pathname.match(/@([^/]+)/);
+      return m ? '@' + m[1] : 'TikTok';
+    }
+    // Media: use hostname
+    return u.hostname.replace('www.', '').split('.')[0];
+  } catch { return 'Unknown'; }
+}
+
+function truncate(str, max) {
+  if (!str) return '';
+  return str.length > max ? str.slice(0, max - 1) + '…' : str;
+}
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -23,15 +75,14 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const tavilyKey = process.env.TAVILY_API_KEY;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!tavilyKey) return res.status(500).json({ error: 'TAVILY_API_KEY not configured' });
-  if (!anthropicKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
 
   const logs = [];
 
   try {
-    // Step 1: Search via Tavily API
-    const chunks = [];
+    const allResults = [];
+    const seenUrls = new Set();
+
     for (const q of QUERIES) {
       logs.push(`🔍 Searching: ${q}`);
       try {
@@ -48,71 +99,46 @@ export default async function handler(req, res) {
         });
 
         if (!searchRes.ok) {
-          logs.push(`❌ Tavily search failed: ${searchRes.status}`);
+          logs.push(`❌ Tavily failed: ${searchRes.status}`);
           continue;
         }
 
         const data = await searchRes.json();
-        const results = (data.results || []).map(r =>
-          `Title: ${r.title}\nURL: ${r.url}\nDate: ${r.published_date || 'unknown'}\nSnippet: ${r.content}`
-        ).join('\n---\n');
+        const results = data.results || [];
+        logs.push(`✅ Got ${results.length} results`);
 
-        if (results.length > 50) {
-          chunks.push(`[Search: ${q}]\n${results}`);
-          logs.push(`✅ Got ${data.results.length} results`);
-        } else {
-          logs.push('⚠️ Too few results');
+        for (const r of results) {
+          if (!r.url || !r.url.startsWith('https://')) continue;
+          if (seenUrls.has(r.url)) continue;
+          seenUrls.add(r.url);
+
+          const combined = (r.title || '') + ' ' + (r.content || '');
+          // Skip irrelevant results
+          if (!/roco|洛克|kingdom/i.test(combined)) continue;
+
+          const dateMatch = (r.published_date || '').match(/(\d{4}-\d{2}-\d{2})/);
+          const date = dateMatch ? dateMatch[1] : new Date().toISOString().slice(0, 10);
+
+          allResults.push({
+            p: detectPlatform(r.url),
+            u: extractUsername(r.url, r.title),
+            t: truncate(r.title || r.content, 60),
+            d: date,
+            s: detectSentiment(combined),
+            l: detectLanguage(combined),
+            url: r.url,
+          });
         }
       } catch (e) {
-        logs.push(`❌ Tavily error: ${e.message}`);
+        logs.push(`❌ Error: ${e.message}`);
       }
     }
 
-    if (chunks.length === 0) {
-      logs.push('⚠️ No search results from any query');
-      return res.status(200).json({ posts: [], issues: [], logs });
-    }
-
-    // Step 2: Analyze with Claude (no web_search tool needed)
-    logs.push(`📦 Analyzing ${chunks.length} result sets with Claude...`);
-    const analysisRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': anthropicKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2048,
-        system: SYS,
-        messages: [{
-          role: 'user',
-          content: chunks.join('\n\n===\n\n').slice(0, 15000),
-        }],
-      }),
-    });
-
-    if (!analysisRes.ok) {
-      const errText = await analysisRes.text().catch(() => '');
-      logs.push(`❌ Claude analysis failed: ${analysisRes.status} ${errText.slice(0, 200)}`);
-      return res.status(200).json({ posts: [], issues: [], logs });
-    }
-
-    const analysisData = await analysisRes.json();
-    const jsonStr = (analysisData.content || [])
-      .map(c => c.type === 'text' ? c.text : '')
-      .filter(Boolean)
-      .join('\n')
-      .replace(/```json|```/g, '')
-      .trim();
-
-    const parsed = JSON.parse(jsonStr);
-    logs.push(`🎉 Found ${(parsed.posts || []).length} posts, ${(parsed.issues || []).length} issues`);
+    logs.push(`📦 Processed ${allResults.length} unique relevant results`);
 
     return res.status(200).json({
-      posts: (parsed.posts || []).filter(p => p.url && p.url.startsWith('https://')),
-      issues: parsed.issues || [],
+      posts: allResults,
+      issues: [],
       logs,
     });
 
