@@ -313,10 +313,18 @@ export default async function handler(req, res) {
       return fallbackParse(allFormatted, logs, res);
     }
 
-    let posts = (parsed.posts || [])
-      .filter(p => p.url?.startsWith('https://'))
-      .map(p => postProcess(p, metadataMap))
-      .filter(p => p.d); // Drop posts without verified date
+    const rawPosts = (parsed.posts || []).filter(p => p.url?.startsWith('https://'));
+    logs.push(`📋 DeepSeek 原始返回: ${rawPosts.length} posts`);
+
+    let posts = rawPosts.map(p => postProcess(p, metadataMap));
+
+    // Log how many have dates vs not
+    const withDate = posts.filter(p => p.d).length;
+    const noDate = posts.filter(p => !p.d).length;
+    if (noDate > 0) logs.push(`⚠️ ${noDate} posts 无日期，使用今日日期`);
+
+    // For posts without date, use today instead of dropping them
+    posts.forEach(p => { if (!p.d) p.d = TODAY; });
 
     // Resolve YouTube channel names via oEmbed (only if we have time budget)
     const elapsed = Date.now() - startTime;
@@ -443,8 +451,6 @@ function fallbackParse(formatted, logs, res) {
     if (seenUrls.has(url)) continue;
     seenUrls.add(url);
 
-    if (!dateM) continue; // Skip undated posts in fallback too
-
     const text = (titleM?.[1] || '') + ' ' + block;
     const s = NEG.test(text) ? 'neg' : POS.test(text) ? 'pos' : 'neu';
 
@@ -463,7 +469,7 @@ function fallbackParse(formatted, logs, res) {
       p: detectPlatform(url),
       u: extractUsername(url, titleM?.[1]),
       t: (titleM?.[1] || '').slice(0, 60),
-      d: dateM[1],
+      d: dateM?.[1] || TODAY,
       s,
       l: lang,
       url,
