@@ -202,7 +202,7 @@ export default async function handler(req, res) {
           body: JSON.stringify({
             api_key: tavilyKey,
             query: q,
-            search_depth: 'basic',
+            search_depth: 'advanced',
             max_results: 5,
             include_raw_content: false,
             days: 14,
@@ -328,10 +328,11 @@ export default async function handler(req, res) {
     // Log how many have dates vs not
     const withDate = posts.filter(p => p.d).length;
     const noDate = posts.filter(p => !p.d).length;
-    if (noDate > 0) logs.push(`⚠️ ${noDate} posts 无日期，使用今日日期`);
+    if (noDate > 0) logs.push(`⚠️ ${noDate} posts 无确切日期`);
+    if (withDate > 0) logs.push(`✅ ${withDate} posts 有确切日期`);
 
-    // For posts without date, use today instead of dropping them
-    posts.forEach(p => { if (!p.d) p.d = TODAY; });
+    // For posts without date, mark with ~TODAY to indicate approximate
+    posts.forEach(p => { if (!p.d) p.d = '~' + TODAY; });
 
     // Resolve YouTube channel names via oEmbed (2s timeout per request, all parallel)
     const ytPosts = posts.filter(p => p.p === 'youtube');
@@ -471,7 +472,7 @@ function fallbackParse(formatted, logs, res) {
       p: detectPlatform(url),
       u: extractUsername(url, titleM?.[1]),
       t: (titleM?.[1] || '').slice(0, 60),
-      d: dateM?.[1] || TODAY,
+      d: dateM?.[1] || ('~' + TODAY),
       s,
       l: lang,
       url,
