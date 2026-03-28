@@ -72,7 +72,10 @@ export default function App() {
     log("🚀 调用 /api/scan ...");
     try {
       const res = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" } });
-      const data = await res.json();
+      if (!res.ok) { log("❌ 服务器错误: " + res.status + " (可能超时，请重试)"); setScanning(false); return; }
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { log("❌ 返回数据解析失败（可能超时），请重试"); setScanning(false); return; }
       (data.logs || []).forEach(l => log(l));
       const urls = new Set(posts.map(p => p.url));
       const merged = [...posts];

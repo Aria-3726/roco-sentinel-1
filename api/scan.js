@@ -2,11 +2,9 @@
 // Tavily 搜索 + DeepSeek 情感分析/中文摘要
 
 const QUERIES = [
-  '"Roco Kingdom World" 2026 site:reddit.com OR site:youtube.com OR site:tiktok.com',
+  '"Roco Kingdom World" 2026 site:reddit.com OR site:youtube.com OR site:tiktok.com OR site:x.com',
   '"Roco Kingdom World" review OR reaction OR controversy 2026',
   '洛克王国世界 海外 reaction global release 2026',
-  '"Roco Kingdom World" site:x.com OR site:twitter.com 2026',
-  '"Roco Kingdom" OR "洛克王国世界" site:threads.net OR site:taptap.io 2026',
 ];
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -191,7 +189,7 @@ export default async function handler(req, res) {
             api_key: tavilyKey,
             query: q,
             search_depth: 'advanced',
-            max_results: 8,
+            max_results: 6,
             include_raw_content: false,
           }),
         });
@@ -253,7 +251,7 @@ export default async function handler(req, res) {
           urlDateHint ? `URL-date-hint: ${urlDateHint}` : null,
           authorHint && authorHint !== 'Unknown' ? `Author-hint: ${authorHint}` : null,
           langHint ? `Lang-hint: ${langHint}` : null,
-          `Snippet: ${(r.content || '').slice(0, 800)}`,
+          `Snippet: ${(r.content || '').slice(0, 600)}`,
         ].filter(Boolean).join('\n'));
 
         // Store metadata for post-processing cross-validation
